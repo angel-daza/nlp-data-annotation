@@ -3,8 +3,11 @@ import json
 from typing import Any, Callable, Dict, List, NamedTuple, Tuple, TypeVar, Union
 import logging
 logger = logging.getLogger(__name__)
+
 import stanza
 StanzaToken = TypeVar("StanzaToken")
+
+import spacy
 
 @dataclass
 class AnnotatedToken():
@@ -92,3 +95,51 @@ def run_stanza_batch(texts: List[List[str]], nlp: stanza.Pipeline) -> Dict:
             stanza_sents.append(" ".join(sent_words))
         batched_docs.append({'stanza_doc': doc, 'sentences':stanza_sents, 'tokens': stanza_tokens, 'token_objs': stanza_info, 'entities': stanza_entities})
     return batched_docs
+
+
+def run_spacy(text: str, nlp: spacy.language) -> Dict:
+    doc = nlp(text)
+    spacy_info, spacy_tokens, spacy_sents = [], [], []
+    spacy_ents = []
+    for sent_ix, sent in enumerate(doc.sents):
+        spacy_sents.append(" ".join([t.text for t in sent]))
+        shifted_sentence = list(sent) + ['</END>']
+        for tok_ix, (tok, next_tok) in enumerate(zip(sent, shifted_sentence[1:])):
+            spacy_tokens.append(tok.text)
+            obj = {'id': tok.i, 
+                    'text': tok.text, 
+                    'lemma': tok.lemma_, 
+                    'upos': tok.pos_, 
+                    'xpos': tok.tag_,
+                    'dep_head': tok.head.i,
+                    'dep_rel': tok.dep_,
+                    'ner_iob': tok.ent_iob_,
+                    'ner_type': tok.ent_type_,
+                    'start_char': tok.idx, 
+                    'end_char': tok.idx + len(tok.text),
+                    'space_after': False if tok_ix < len(sent)-1 and tok.idx + len(tok.text) == next_tok.idx else True,
+                    'like_url': tok.like_url,
+                    'like_email': tok.like_email,
+                    'is_oov': tok.is_oov,
+                    'is_alpha': tok.is_alpha,
+                    'is_punct': tok.is_punct,
+                    'sent_id': sent_ix,
+                    'is_sent_start': tok.is_sent_start,
+                    'is_sent_end': tok.is_sent_end
+                    }
+            spacy_info.append(obj)
+        # The last char of a sentence needs some manual inspecion to properly set the space_after and is_sent_end!
+        if len(spacy_info) > 0:
+            if obj['end_char'] < len(text):
+                lookahead_char = text[obj['end_char']]
+                if lookahead_char != " ":
+                    spacy_info[-1]['space_after'] = False
+            else:
+                spacy_info[-1]['space_after'] = False
+    # if doc.ents:
+    #     for ent in doc.ents:
+    #         # spacy_ents.append((ent.text, ent.label_, doc[ent.start].idx, doc[ent.end].idx, ent.start, ent.end))
+    #         spacy_ents.append({'text': ent.text, 'label': ent.label_, 'start': doc[ent.start].idx, 'end': doc[ent.end].idx, 'start_token': ent.start, 'end_token': ent.end})
+        
+
+    return {'spacy_doc': doc,'sentences':spacy_sents, 'tokens': spacy_tokens, 'token_objs': spacy_info, 'entities': spacy_ents}
