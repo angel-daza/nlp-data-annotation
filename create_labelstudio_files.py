@@ -5,11 +5,11 @@ import csv
 import spacy
 
 
-def biographynet_labelstudio_files():
-    labelstudio_path = "outputs/biographynet/test/labelstudio"
+def biographynet_labelstudio_files(partition: str):
+    labelstudio_path = f"outputs/biographynet/{partition}/labelstudio"
     if not os.path.exists(labelstudio_path): os.makedirs(labelstudio_path, exist_ok=True)
-    with open(f"{labelstudio_path}/token2spans.json", "w") as fspans:
-        with open("outputs/biographynet/biographynet_test.jsonl") as f:
+    with open(f"{labelstudio_path}/token2spans_{partition}.json", "w") as fspans:
+        with open(f"outputs/biographynet/biographynet_{partition}.jsonl") as f:
             for i, line in enumerate(f):
                 bio = json.loads(line)
                 metadata = {}
@@ -19,7 +19,7 @@ def biographynet_labelstudio_files():
                 json.dump(task, open(f"{labelstudio_path}/{bio['id_composed']}.ls.json", "w"), indent=2)
                 span_obj = {'text_id': bio['id_composed'], 'token2spans': token2spans}
                 fspans.write(f"{json.dumps(span_obj)}\n")
-                if i > 10: break
+                # if i > 10: break
 
 
 def wikipedia_labelstudio_files():
@@ -54,5 +54,6 @@ def wikipedia_labelstudio_files():
 
 
 if __name__ == '__main__':
-    # biographynet_labelstudio_files()
-    wikipedia_labelstudio_files()
+    # biographynet_labelstudio_files(partition='test')
+    biographynet_labelstudio_files(partition='development')
+    # wikipedia_labelstudio_files()
