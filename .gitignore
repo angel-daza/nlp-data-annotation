@@ -1,3 +1,5 @@
+.my_venv/
+
 outputs/*
 
 # Byte-compiled / optimized / DLL files

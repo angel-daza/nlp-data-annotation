@@ -6,19 +6,16 @@ import stanza
 
 from utils.biographynet import DataCleaner, get_biographynet_objects, get_from_input_xml, get_partition_ids
 
+## For Processing the whole BiographyNet Dataset this should point to the bioport-export root directory containing all of the XML files
+# BIONET_XML_DIR = "/Users/daza/DATA/BiographyNet/bioport_export_2017-03-10/"
+## Here for testing purposes we point to a toy_root_xml directory containing a few files:
+BIONET_XML_DIR = "toy_bionet_xml/"
 
-BIONET_XML_DIR = "/Users/daza/DATA/BiographyNet/bioport_export_2017-03-10/"
 BIONET_OUTPUT_DIR = "outputs/biographynet"
 NLP_BATCH_SIZE = 4
 
 
 def main():
-    
-    # Logging Config
-    console_hdlr = logging.StreamHandler(sys.stdout)
-    file_hdlr = logging.FileHandler(filename=f"{BIONET_OUTPUT_DIR}/bionet_to_json.log")
-    logging.basicConfig(level=logging.INFO, handlers=[console_hdlr, file_hdlr], datefmt='%Y-%m-%d %H:%M:%S')
-    logging.info("Start Logging")
 
     # Create Output Folders
     if not os.path.exists(BIONET_OUTPUT_DIR): os.makedirs(BIONET_OUTPUT_DIR)
@@ -30,10 +27,17 @@ def main():
         if not os.path.exists(f"{folder_path}/text"): os.makedirs(f"{folder_path}/text")
         if not os.path.exists(f"{folder_path}/json"): os.makedirs(f"{folder_path}/json")
     
+    # Logging Config
+    console_hdlr = logging.StreamHandler(sys.stdout)
+    file_hdlr = logging.FileHandler(filename=f"{BIONET_OUTPUT_DIR}/bionet_to_json.log")
+    logging.basicConfig(level=logging.INFO, handlers=[console_hdlr, file_hdlr], datefmt='%Y-%m-%d %H:%M:%S')
+    logging.info("Start Logging")
+
+
     # Get the IDs for Test Set Partition
-    testset_ids = get_partition_ids("/Users/daza/DATA/BiographyNet/test_ids.txt")
+    testset_ids = get_partition_ids("test_ids.txt")
     # Get the IDs for Development Partition
-    devset_ids = get_partition_ids("/Users/daza/DATA/BiographyNet/dev_ids.txt")
+    devset_ids = get_partition_ids("dev_ids.txt")
     print(testset_ids)
 
     root_dir = f"{BIONET_XML_DIR}/*" 
@@ -65,6 +69,7 @@ def main():
                 # Create Text File
                 if len(data_row.text_tokens) == 0: 
                     empty_bios += 1
+                else:
                     bio_to_txt_file(f"{folder_path}/text", data_row.id_person, data_row.version, data_row.source, data_row.text_clean)
                 # Create Invididual JSON for a Biography (equivalent to a row in the biographynet_metadata.jsonl)
                 with open(f"{folder_path}/json/{data_row.id_person}_{data_row.version}.json", "w") as individual_fout:

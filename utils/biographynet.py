@@ -386,7 +386,7 @@ def create_labelstudio_file(biography: BiographyJSON, filepath: str):
 ##### ---------- AUXILIARY FUNCTIONS ---------- #####
 def get_partition_ids(filepath):
     with open(filepath) as f:
-        return f.readlines()
+        return [x.strip() for x in f.readlines()]
 
 def _category_to_list(cat_key: str, info_dict: Dict) -> List[Dict[str, str]]:
     '''
