@@ -104,11 +104,10 @@ class AnnotatedDocument():
         return all_annotations
 
 
-
-
 def tokenize_sentences(token_objs):
     sentecized_tokens = defaultdict(list)
     token2spans = {}
+    if len(token_objs) == 0: return [], {}
 
     # If no sentences ids are known then we can't tokenize per sentence
     if 'sent_id' not in token_objs[0]:
@@ -142,6 +141,8 @@ def text2labelstudio_tokenized(text_id: str, text: str, metadata: Dict[str, Any]
                 new_text.append(sent)
             else:
                 new_text.append(sent)
+    else:
+        new_text = " ".join(tokenized_sentences)
     obj = {"text_id": text_id, "original": text, "text": " ".join(new_text), "sentences": tokenized_sentences}
     for k,v in metadata.items():
         if k not in ['token_objects']:

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, asdict
-import json
+import json, os
 from typing import Any, List, Dict, Tuple
 from sklearn.metrics import classification_report
 from tabulate import tabulate
@@ -25,19 +25,19 @@ LABEL_2_ID = {
 }
 
 ANNOTATOR_IDS = {
-    "1": "Angel Daza",
-    "4": "Celonie Rozema",
-    "7": "Martijn van der Wijck",
-    "8": "Ouidad Bellalli"
+    "1": "Angel D",
+    "4": "Celonie R",
+    "7": "Martijn vd W",
+    "8": "Ouidad B"
 }
 
 
-def analyze_annotated_corpus(is_pretokenized: bool = True):
-    # TODO: Create the TWO Paths for Raw vs Pre-Tokenized Pipelines ...
-    labelstudio_annotations, doc2annotators, annotator2docs = load_tokenized_annotation_objects("entities", 
-                                                                                                "project-13-at-2023-02-10-13-21-d1171acb.json", 
-                                                                                                "outputs/biographynet/test/labelstudio/token2spans.json"
-                                                                                                )
+def analyze_annotated_corpus(annotation_type: str, partition: str, labelstudio_json_path: str, token2spans_path: str = None):
+    if token2spans_path:
+        labelstudio_annotations, doc2annotators, annotator2docs = load_tokenized_annotation_objects(annotation_type, labelstudio_json_path, token2spans_path)
+    else:
+        raise NotImplementedError("Currently it is only possible to process pretokenized files. Please Provide a dictionary of Token2Spans")
+    
     f1_interagreement_dict = defaultdict(dict)
     alpha_interagreement_dict = defaultdict(dict)
     all_errors = []
@@ -54,8 +54,9 @@ def analyze_annotated_corpus(is_pretokenized: bool = True):
                                                                             f1_interagreement_dict, alpha_interagreement_dict, show_label_detail=False)
         all_errors += errors_annotator_pair
 
+    if not os.path.exists(f"outputs/biographynet/{partition}/statistics/"): os.mkdir(f"outputs/biographynet/{partition}/statistics/")
     # Save Tokenized Corpus
-    tok_corpus_path = "outputs/biographynet/test/labelstudio/corpus_tokenized.json"
+    tok_corpus_path = f"outputs/biographynet/{partition}/corpus_tokenized.json"
     tokenized_corpus = {}
     for tid, anno_layers in labelstudio_annotations.items():
         tokenized_corpus[tid] = {'tokens': anno_layers[0].tokens, 'token2spans': anno_layers[0].tokens2spans}
@@ -64,16 +65,16 @@ def analyze_annotated_corpus(is_pretokenized: bool = True):
     # Save DataFrame with All Annotated Data
     all_annotations = create_annotations_table(labelstudio_annotations, len(annotator2docs.keys()))
     annotations_df = pd.DataFrame(all_annotations)
-    annotations_df.to_csv("outputs/biographynet/test/statistics/annotations_all.tsv", sep="\t")
+    annotations_df.to_csv(f"outputs/biographynet/{partition}/statistics/annotations_all.tsv", sep="\t")
 
     # Save DataFrame for Error Analysis
     error_df = pd.DataFrame(all_errors)
-    error_df.to_csv("outputs/biographynet/test/statistics/annotator_errors.tsv", sep="\t")
+    error_df.to_csv(f"outputs/biographynet/{partition}/statistics/annotator_errors.tsv", sep="\t")
     
     # Average agreement and show a SINGLE MATRIX for annotators across the whole corpus
     valid_annotator_ids = list(annotator2docs.keys())
-    plot_matrix_of_averages(f1_interagreement_dict, valid_annotator_ids, f'outputs/biographynet/test/statistics/MEAN_f1_agreement.png')
-    plot_matrix_of_averages(alpha_interagreement_dict, valid_annotator_ids, f'outputs/biographynet/test/statistics/MEAN_alpha_agreement.png')
+    plot_matrix_of_averages(f1_interagreement_dict, valid_annotator_ids, f'outputs/biographynet/{partition}/statistics/MEAN_f1_agreement.png')
+    plot_matrix_of_averages(alpha_interagreement_dict, valid_annotator_ids, f'outputs/biographynet/{partition}/statistics/MEAN_alpha_agreement.png')
         
 
 
@@ -157,11 +158,9 @@ def _strip_bordering_spaces(span_text: str, start: int, end: int):
 
 
 def get_token2span_mapper(filepath: str) -> Dict[str, Dict[int, Tuple[int, int]]]:
-    token_map = {}
-    with open(filepath) as f:
-        for line in f:
-            obj = json.loads(line)
-            token_map[obj['text_id']] = {int(k):v for k,v in obj['token2spans'].items()}
+    token_map = json.load(open(filepath))
+    for text_id in token_map.keys():
+        token_map[text_id] = {int(k):v for k,v in token_map[text_id].items()}
     return token_map
 
     
@@ -442,6 +441,7 @@ def create_annotations_table(labelstudio_annotations: Dict[str, List[AnnotatedDo
         for span_id, spans in unified_spans.items():
             span = spans[0]
             all_labels = " ".join(list(set([sp.label for sp in spans])))
+            aggr_level = len(spans)/ tot_annotators
             annotation_table.append({
                 'text_id': text_id,
                 'annotator_id': span.annotator_id, 
@@ -452,9 +452,9 @@ def create_annotations_table(labelstudio_annotations: Dict[str, List[AnnotatedDo
                 'token_end': str(span.end_token),
                 'annotated_text': span.text,
                 'annotated_label': all_labels,
-                'agreement_level': len(spans)/ tot_annotators,
-                'STATUS': '-',
-                'NEW_SPAN': '-',
+                'agreement_level': aggr_level,
+                'STATUS': 'CORRECT' if aggr_level >= 1.0 else '-',
+                'NEW_SPAN_TOKS': '-',
                 'context_window': " ".join(get_context_window(layer.tokens, span, window_size=8))       
             })
 
@@ -555,7 +555,7 @@ def read_annotations_table(annotation_layer: str, anonotations_path: str, tokeni
                     annotated_spans[text_id].append(SpanAnnotation(annotation_layer, char_start, char_end, span_text, label, int_start, int_end, span_tokens, annotator_id="gold"))
 
     for text_id, spans in annotated_spans.items():
-        annotations[text_id].append(AnnotatedDocument(text_id, "", tokenized_dict[text_id], spans))
+        annotations[text_id].append(AnnotatedDocument(text_id, "", tokens=tokenized_dict[text_id]['tokens'], annotated_spans=spans, tokens2spans=tokenized_dict[text_id]['token2spans']))
 
     return annotations
 
@@ -577,10 +577,10 @@ def annotated2conll(documents: Dict[str, List[AnnotatedDocument]], output_path: 
 
 
 def annotated2json(documents: Dict[str, List[AnnotatedDocument]], output_path: str):
-    json_docs = []
+    json_docs = {}
     for text_id, docs in documents.items():
             for doc in docs:
-                json_docs.append(doc.to_json())
+                json_docs[text_id] = doc.to_json()
     json.dump(json_docs, open(output_path, "w"), indent=2)
 
 
@@ -598,12 +598,11 @@ def get_basic_doc_schema(text_id: str, text: str, basic_nlp_processor: str):
     return json_doc
 
 
-def generate_interannotator_json(output_json_path: str):
-    labelstudio_annotations, _, _ = load_tokenized_annotation_objects("entities", "project-13-at-2023-02-10-13-21-d1171acb.json", 
-                                                                       "outputs/biographynet/test/labelstudio/token2spans.json")
+def generate_interannotator_json(annotation_layer: str, labelstudio_json_path: str, output_json_path: str, token2spans_path: str, tokenized_corpus_path: str, annotations_all_tsv_path: str):
+    labelstudio_annotations, _, _ = load_tokenized_annotation_objects(annotation_layer, labelstudio_json_path, token2spans_path)
     
-    tokenized_dict = json.load(open("outputs/biographynet/test/labelstudio/corpus_tokenized.json"))
-    annotated_issues_solved_docs = read_annotations_table("entities", "outputs/biographynet/test/statistics/annotations_all.tsv", tokenized_dict)
+    tokenized_dict = json.load(open(tokenized_corpus_path))
+    annotated_issues_solved_docs = read_annotations_table(annotation_layer, annotations_all_tsv_path, tokenized_dict)
     
     all_annotated_docs = []
     for text_id, docs in labelstudio_annotations.items():
@@ -623,25 +622,36 @@ def generate_interannotator_json(output_json_path: str):
 
 
 if __name__ == "__main__":
+    
+    partition = "train"
+
     ### ----- CASE 1: Analyze and compare multiple annotators over a group of documents.
     # Output: An Annotations Table that can be adited to solve annotators conflict
-    analyze_annotated_corpus()
+    analyze_annotated_corpus(annotation_type="entities", 
+                             partition=partition, 
+                             labelstudio_json_path="testing_ls.json", # This is the file exported from the LabelStudio interface
+                             token2spans_path=f"outputs/biographynet/{partition}/token2spans_{partition}.json")
     
-    ### ----- CASE 2: An Annotated table with the conflicts solved is already produced. 
+    ### ----- CASE 2: An Annotated table with the conflicts solved is already produced in CASE 1. 
     # Here we output a file with the GOLD ANNOTATIONS (e.g. in CoNLL-U Format) 
     generate_gold_annotations(annotations_layer="entities",
-                                anonotations_path="outputs/biographynet/test/statistics/annotations_all.tsv", 
-                                tokenized_corpus_path="outputs/biographynet/test/labelstudio/corpus_tokenized.json", 
-                                output_path="outputs/biographynet/test/cheche.conll",
-                                format="conll"
-                           )
-    
-    generate_gold_annotations(annotations_layer="entities",
-                                anonotations_path="outputs/biographynet/test/statistics/annotations_all.tsv", 
-                                tokenized_corpus_path="outputs/biographynet/test/labelstudio/corpus_tokenized.json", 
-                                output_path="outputs/biographynet/test/cheche.json",
+                                anonotations_path=f"outputs/biographynet/{partition}/statistics/annotations_all.tsv", 
+                                tokenized_corpus_path=f"outputs/biographynet/{partition}/corpus_tokenized.json",  
+                                output_path=f"outputs/biographynet/{partition}/testing_ls_gold.json",
                                 format="json"
                             )
 
+    generate_gold_annotations(annotations_layer="entities",
+                                anonotations_path=f"outputs/biographynet/{partition}/statistics/annotations_all.tsv", 
+                                tokenized_corpus_path=f"outputs/biographynet/{partition}/corpus_tokenized.json",  
+                                output_path=f"outputs/biographynet/{partition}/testing_ls_gold.conll",
+                                format="conll"
+                           )
+
     ### ----- CASE 3: Generate a JSON containing all of the seen annotations (can be loaded by future scripts to compute/visualize further interannotator operations)
-    generate_interannotator_json("outputs/biographynet/test/cheche_all_humans.json")
+    generate_interannotator_json(annotation_layer="entities", 
+                                 labelstudio_json_path="testing_ls.json", 
+                                 output_json_path=f"outputs/biographynet/{partition}/testing_ls_all_humans.json", 
+                                 token2spans_path=f"outputs/biographynet/{partition}/token2spans_{partition}.json", 
+                                 tokenized_corpus_path=f"outputs/biographynet/{partition}/corpus_tokenized.json",
+                                 annotations_all_tsv_path=f"outputs/biographynet/{partition}/statistics/annotations_all.tsv")
