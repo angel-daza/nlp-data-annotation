@@ -12,7 +12,7 @@ import pandas as pd
 
 from spacy.tokens import Doc
 
-from utils.labelstudio import AnnotatedDocument, SpanAnnotation
+from utils.labelstudio import AnnotatedDocument, SpanAnnotation, RelationAnnotation
 
 LABEL_2_ID = {
     "O": 0,
@@ -33,10 +33,15 @@ ANNOTATOR_IDS = {
 
 
 def analyze_annotated_corpus(annotation_type: str, partition: str, labelstudio_json_path: str, token2spans_path: str = None):
-    if token2spans_path:
-        labelstudio_annotations, doc2annotators, annotator2docs = load_tokenized_annotation_objects(annotation_type, labelstudio_json_path, token2spans_path)
+    if annotation_type == "entities":
+        if token2spans_path:
+            labelstudio_annotations, doc2annotators, annotator2docs = load_tokenized_annotation_objects(annotation_type, labelstudio_json_path, token2spans_path)
+        else:
+            raise NotImplementedError("Currently it is only possible to process pretokenized files. Please Provide a dictionary of Token2Spans")
+    elif annotation_type == "relations":
+        labelstudio_annotations, doc2annotators, annotator2docs = load_annotation_full_objects("relations", [labelstudio_json_path], token2spans_path)
     else:
-        raise NotImplementedError("Currently it is only possible to process pretokenized files. Please Provide a dictionary of Token2Spans")
+        raise NotImplementedError(f"There is not code to handle annotation_type = '{annotation_type}'")
     
     f1_interagreement_dict = defaultdict(dict)
     alpha_interagreement_dict = defaultdict(dict)
@@ -46,7 +51,7 @@ def analyze_annotated_corpus(annotation_type: str, partition: str, labelstudio_j
     for ref_anno_id in annotator2docs.keys():
         print(f"============================ ANALYZING ANNOTATOR: {ref_anno_id} ============================")
         ref_annotated_docs = [doc for tid, docs in labelstudio_annotations.items() for doc in docs if doc.annotator_id == ref_anno_id]
-        analyze_annotator(ref_anno_id, ref_annotated_docs)
+        analyze_annotator(annotation_type, ref_anno_id, ref_annotated_docs)
         # At each iteration, ref_anno_id will be considered "gold" and the other is considered "a predictor"
         hyp_anno_ids = [hyp_anno_id for hyp_anno_id in annotator2docs.keys() if ref_anno_id != hyp_anno_id]
         print(f"(HYPS: {hyp_anno_ids})")
@@ -63,9 +68,15 @@ def analyze_annotated_corpus(annotation_type: str, partition: str, labelstudio_j
     json.dump(tokenized_corpus, open(tok_corpus_path, "w"), indent=2)
 
     # Save DataFrame with All Annotated Data
-    all_annotations = create_annotations_table(labelstudio_annotations, len(annotator2docs.keys()))
-    annotations_df = pd.DataFrame(all_annotations)
-    annotations_df.to_csv(f"outputs/biographynet/{partition}/statistics/annotations_all.tsv", sep="\t")
+    if annotation_type == "entities":
+        all_annotations = create_annotations_table(labelstudio_annotations, len(annotator2docs.keys()))
+        annotations_df = pd.DataFrame(all_annotations)
+        annotations_df.to_csv(f"outputs/biographynet/{partition}/statistics/annotations_all.tsv", sep="\t")
+    elif annotation_type == "relations":
+        all_annotations = create_relation_annotations_table(labelstudio_annotations, doc2annotators)
+        annotations_df = pd.DataFrame(all_annotations)
+        annotations_df.to_csv(f"outputs/biographynet/{partition}/statistics/annotations_relations_all.tsv", sep="\t")
+    
 
     # Save DataFrame for Error Analysis
     error_df = pd.DataFrame(all_errors)
@@ -98,6 +109,111 @@ def load_tokenized_annotation_objects(annotation_layer: str, filepath: str, base
         doc2annotators[task_obj['text_id']].append(task_obj['annotator'])
         annotator2docs[task_obj['annotator']].append(task_obj['text_id'])
     return annotations, doc2annotators, annotator2docs 
+
+
+def load_annotation_full_objects(annotation_layer: str, filepaths: List[str], basepath_token2spans: str) -> Tuple[Dict[str, List[AnnotatedDocument]], Dict[str, List], Dict[str, List]]:
+    """Loads the exported JSON-FULL File from LabelStudio
+
+    Args:
+        annotation_layer(str): Linguistic layer name to refer to the annotation spans (semantic roles, phrases, entities, etc...)
+        filepath (str): The JSON min. File that is directly produced by LabelStudio
+        basepath_json_files (str): the dicrectory where the original biographynet files can be found
+
+    Returns:
+        Tuple[Dict, Dict, Dict]:
+            annotations: 
+            doc2annotators: {'text_id': [List[int] of Annotator IDs ]} All annotators that contributed spans in a single text
+            annotator2docs: {'annotator_id': [List[str] of Text IDs ]} All texts annotated by a single annotator
+    """
+    ls_tasks = []
+    for filepath in filepaths:
+        ls_tasks += json.load(open(filepath))
+    
+    token2spans = get_token2span_mapper(basepath_token2spans)
+    annotated_documents = defaultdict(list)
+
+    doc2annotators = defaultdict(list)
+    annotator2docs = defaultdict(list)
+    for task_obj in ls_tasks:
+        text_id = task_obj['data']['text_id']
+        full_text = task_obj['data']['original']
+        tok2span = token2spans[text_id]
+        full_tokenized = []
+
+        document_tokens = task_obj['data']['text'].split()
+        visual_separator = "\n\n-~-\n\n"
+        strip_visual_separator = "-~-" # This is because the strip() gets rid of the \n but they count for char spans!
+        fake_charstarts2token, fake_charends2token = {}, {}
+        doc_char_offset, token_counter = 0, 0
+        real_tokens = []
+        for tok in document_tokens:
+            if tok == strip_visual_separator:
+                start = doc_char_offset
+                end = doc_char_offset + len(visual_separator)
+                doc_char_offset += len(visual_separator) + 1
+            else:
+                start = doc_char_offset
+                end = doc_char_offset + len(tok)
+                fake_charstarts2token[start] = token_counter
+                fake_charends2token[end] = token_counter
+                token_counter += 1
+                real_tokens.append(tok)
+                doc_char_offset += len(tok) + 1
+
+        # This Iterates per Annotation LAYER (i.e. per annotator on the same document text)
+        for annotator_annos in task_obj['annotations']:
+            annotated_entities, annotated_relations = [], []
+            spanID_2_entity = defaultdict(dict)
+            annotation_id = annotator_annos['id']
+            annotator_id = annotator_annos['completed_by']
+            annotation_time = annotator_annos['lead_time']
+            
+            for anno in annotator_annos["result"]:
+                if anno.get('type') == 'relation':
+                    # print("REL", anno)
+                    for lbl in anno['labels']:
+                        relation = RelationAnnotation('relations', text_id, anno['from_id'], anno['to_id'], lbl, lbl.split(":")[-2])
+                        annotated_relations.append(relation)
+                elif anno.get('type') == 'labels':
+                    # start_token = charstarts2token.get(anno['value']['start'], -15893)
+                    # end_token = charends2token.get(anno['value']['end'], -15894)
+                    start_token = fake_charstarts2token[anno['value']['start']]
+                    end_token = fake_charends2token[anno['value']['end']]
+                    tokens = real_tokens[start_token:end_token+1]
+                    entity = SpanAnnotation('entities',
+                                            tok2span[start_token][0], 
+                                            tok2span[end_token][1],
+                                            anno['value']['text'], 
+                                            anno['value']['labels'][0],
+                                            start_token=start_token,
+                                            end_token=end_token+1,
+                                            tokens=tokens,
+                                            text_id=text_id)
+                    annotated_entities.append(entity)
+                    spanID_2_entity[anno['id']] = entity
+                    print(start_token, end_token, f"{start_token}{end_token}")
+                    print("REL", anno)
+                    print(f"'{anno['value']['text']}' <---> '{full_text[tok2span[start_token][0]:tok2span[end_token][1]]}' <--> {tokens}")
+                    print("----")
+            
+            doc2annotators[text_id].append(annotator_id)
+            annotator2docs[annotator_id].append(text_id)
+            # Populate the Relation Objects with more understandable Data and Link them to EntityObjects
+            for a in annotated_relations:
+                subj = spanID_2_entity[a.from_id]
+                obj = spanID_2_entity[a.to_id]
+                a.subject_entity = subj
+                a.object_entity = obj
+                # if a.from_id == a.to_id:
+                #     # print(a.default_subject, a.clean_label, obj.text)
+                # else:
+                #     # print(subj.text, a.clean_label, obj.text)
+            # Create AnnotatedDocument
+            document = AnnotatedDocument(text_id, full_text, full_tokenized, annotated_relations, annotated_relations, tok2span, annotator_id, annotation_time)
+            annotated_documents[text_id].append(document)
+
+    return annotated_documents, doc2annotators, annotator2docs 
+
 
 
 def adjust_span_annotations_tokenized(annotation_layer_name: str, task_obj: Dict[str, Any], token2spans: Dict, document_tokens: List[str]) -> Tuple[List[SpanAnnotation], str]:
@@ -166,17 +282,7 @@ def get_token2span_mapper(filepath: str) -> Dict[str, Dict[int, Tuple[int, int]]
     
 
 
-def analyze_annotator(annotator_id: int, annotations: List[AnnotatedDocument]):
-    """_summary_
-
-    Args:
-        !!!!! annotator_id (int): The INT part of annotator ID (as generated by LabelStudio)
-        !!!!! annotations (List[SpanAnnotation]): List of ALL populated annotations that belong to this annotator
-        !!!!! annotation_times (Dict[str, int]): Global Dictionary containing the annotation times per annotator (as computed by LabelStudio)
-
-    Returns:
-        annotated_per_text List[str]: List of Text_Anno_IDS that they annotated. Can be used to retrieve their annotations elsewhere
-    """
+def analyze_annotator(annotation_layer: str,annotator_id: int, annotations: List[AnnotatedDocument]):
     annotated_per_text ={}
     annotated_labels = []
     total_annotation_time = 0
@@ -184,7 +290,10 @@ def analyze_annotator(annotator_id: int, annotations: List[AnnotatedDocument]):
     for anno_doc in annotations:
         print(f"\tAnnotated Text {anno_doc.text_id} (annotation time = {anno_doc.annotation_time/60: .2f} minutes)")
         total_annotation_time += anno_doc.annotation_time
-        this_labels = [anno_sp.label for anno_sp in anno_doc.annotated_spans]
+        if annotation_layer == "entities":
+            this_labels = [anno_sp.label for anno_sp in anno_doc.annotated_spans]
+        elif annotation_layer == "relations":
+            this_labels = [anno.clean_label for anno in anno_doc.annotated_relations]
         annotated_per_text[anno_doc.text_id] = this_labels
         annotated_labels += this_labels
 
@@ -461,6 +570,55 @@ def create_annotations_table(labelstudio_annotations: Dict[str, List[AnnotatedDo
     return sorted(annotation_table, key=lambda x: (x['text_id'], x['span_start'], -x['agreement_level']))
 
 
+def create_relation_annotations_table(labelstudio_annotations: Dict[str, List[AnnotatedDocument]], doc2annotators: Dict[str, List[str]]) -> List[Dict]:
+    annotation_table = []
+
+    corpus_level_relation_stats = []
+
+    for text_id, annotation_layers in labelstudio_annotations.items():
+        unified_relations = defaultdict(list)
+        person_id = text_id.split("_")[0]
+        for layer in annotation_layers:
+            for rel in layer.annotated_relations:
+                unified_relations[f"{rel.subject_entity.text}##{rel.clean_label}##{rel.object_entity.text}"].append(rel)
+                corpus_level_relation_stats.append(rel.relation_type)
+            
+        for rel_id, rels in unified_relations.items():
+            rel = rels[0]
+            all_labels = " ".join(list(set([sp.clean_label for sp in rels])))
+
+            if rel.subject_entity.text == rel.object_entity.text:
+                rel_subject = person_id
+                subj_rel_status = True
+            else:
+                rel_subject = rel.subject_entity.text
+                subj_rel_status = False
+
+            annotation_table.append({
+                'text_id': text_id,
+                'annotator_id': rel.subject_entity.annotator_id, 
+                'annotated_relation': rel_id,
+                'subj_relation_is_bio_id': subj_rel_status,
+                'subj_span_start': rel.subject_entity.start_char,
+                'subj_span_end': rel.subject_entity.end_char,
+                'obj_span_start': rel.object_entity.start_char,
+                'obj_span_end': rel.object_entity.end_char,
+                'subj_token_start': str(rel.subject_entity.start_token),
+                'subj_token_end': str(rel.subject_entity.end_token),
+                'obj_token_start': str(rel.object_entity.start_token),
+                'obj_token_end': str(rel.object_entity.end_token),
+                'annotated_subj_text': rel_subject, # rel.subject_entity.text,
+                'annotated_obj_text': rel.object_entity.text,
+                'annotated_label': all_labels,
+                'agreement_level': len(rels)/ len(doc2annotators[rel.subject_entity.text_id]),
+                'STATUS': '_',
+                'NEW_SPAN_TOKS': '_',
+                # 'context_window': " ".join(get_context_window(layer.tokens, span, window_size=8))       
+            })
+
+    return sorted(annotation_table, key=lambda x: (x['text_id'], x['subj_span_start'], -x['agreement_level']))
+
+
 def get_context_window(document_tokens: List[str], target_span: SpanAnnotation, window_size: int = 5):
     window_init, window_end = 0, len(document_tokens)
     if target_span.start_token and target_span.start_token - window_size > 0: 
@@ -625,33 +783,46 @@ if __name__ == "__main__":
     
     partition = "train"
 
-    ### ----- CASE 1: Analyze and compare multiple annotators over a group of documents.
-    # Output: An Annotations Table that can be adited to solve annotators conflict
-    analyze_annotated_corpus(annotation_type="entities", 
-                             partition=partition, 
-                             labelstudio_json_path="testing_ls.json", # This is the file exported from the LabelStudio interface
-                             token2spans_path=f"outputs/biographynet/{partition}/token2spans_{partition}.json")
+    ##########################################################################################
+    ######################## CASES FOR SPAN-BASED (ENTITY) ANNOTATIONS ########################
+    ##########################################################################################
+
+    # ### ----- CASE 1: Analyze and compare multiple annotators over a group of documents.
+    # # Output: An Annotations Table that can be adited to solve annotators conflict
+    # analyze_annotated_corpus(annotation_type="entities", 
+    #                          partition=partition, 
+    #                          labelstudio_json_path="testing_ls.json", # This is the file exported from the LabelStudio interface as "Export JSON MIN"
+    #                          token2spans_path=f"outputs/biographynet/{partition}/token2spans_{partition}.json")
     
-    ### ----- CASE 2: An Annotated table with the conflicts solved is already produced in CASE 1. 
-    # Here we output a file with the GOLD ANNOTATIONS (e.g. in CoNLL-U Format) 
-    generate_gold_annotations(annotations_layer="entities",
-                                anonotations_path=f"outputs/biographynet/{partition}/statistics/annotations_all.tsv", 
-                                tokenized_corpus_path=f"outputs/biographynet/{partition}/corpus_tokenized.json",  
-                                output_path=f"outputs/biographynet/{partition}/testing_ls_gold.json",
-                                format="json"
-                            )
+    # ### ----- CASE 2: An Annotated table with the conflicts solved is already produced in CASE 1. 
+    # # Here we output a file with the GOLD ANNOTATIONS (e.g. in CoNLL-U Format) 
+    # generate_gold_annotations(annotations_layer="entities",
+    #                             anonotations_path=f"outputs/biographynet/{partition}/statistics/annotations_all.tsv", 
+    #                             tokenized_corpus_path=f"outputs/biographynet/{partition}/corpus_tokenized.json",  
+    #                             output_path=f"outputs/biographynet/{partition}/testing_ls_gold.json",
+    #                             format="json"
+    #                         )
 
-    generate_gold_annotations(annotations_layer="entities",
-                                anonotations_path=f"outputs/biographynet/{partition}/statistics/annotations_all.tsv", 
-                                tokenized_corpus_path=f"outputs/biographynet/{partition}/corpus_tokenized.json",  
-                                output_path=f"outputs/biographynet/{partition}/testing_ls_gold.conll",
-                                format="conll"
-                           )
+    # generate_gold_annotations(annotations_layer="entities",
+    #                             anonotations_path=f"outputs/biographynet/{partition}/statistics/annotations_all.tsv", 
+    #                             tokenized_corpus_path=f"outputs/biographynet/{partition}/corpus_tokenized.json",  
+    #                             output_path=f"outputs/biographynet/{partition}/testing_ls_gold.conll",
+    #                             format="conll"
+    #                        )
 
-    ### ----- CASE 3: Generate a JSON containing all of the seen annotations (can be loaded by future scripts to compute/visualize further interannotator operations)
-    generate_interannotator_json(annotation_layer="entities", 
-                                 labelstudio_json_path="testing_ls.json", 
-                                 output_json_path=f"outputs/biographynet/{partition}/testing_ls_all_humans.json", 
-                                 token2spans_path=f"outputs/biographynet/{partition}/token2spans_{partition}.json", 
-                                 tokenized_corpus_path=f"outputs/biographynet/{partition}/corpus_tokenized.json",
-                                 annotations_all_tsv_path=f"outputs/biographynet/{partition}/statistics/annotations_all.tsv")
+    # ### ----- CASE 3: Generate a JSON containing all of the seen annotations (can be loaded by future scripts to compute/visualize further interannotator operations)
+    # generate_interannotator_json(annotation_layer="entities", 
+    #                              labelstudio_json_path="testing_ls.json", 
+    #                              output_json_path=f"outputs/biographynet/{partition}/testing_ls_all_humans.json", 
+    #                              token2spans_path=f"outputs/biographynet/{partition}/token2spans_{partition}.json", 
+    #                              tokenized_corpus_path=f"outputs/biographynet/{partition}/corpus_tokenized.json",
+    #                              annotations_all_tsv_path=f"outputs/biographynet/{partition}/statistics/annotations_all.tsv")
+    
+
+    ##########################################################################################
+    ################# CASES FOR RELATION-BASED (ENTITY+RELATION) ANNOTATIONS #################
+    ##########################################################################################
+    analyze_annotated_corpus(annotation_type="relations", 
+                             partition=partition, 
+                             labelstudio_json_path="testing_ls_full.json", # This is the file exported from the LabelStudio interface as "Export Full JSON"
+                             token2spans_path=f"outputs/biographynet/{partition}/token2spans_{partition}.json")

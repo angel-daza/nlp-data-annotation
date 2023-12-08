@@ -52,6 +52,16 @@ class SpanAnnotation():
     annotator_id: int = None
     annotation_id: int = None
 
+@dataclass
+class RelationAnnotation():
+    annotation_layer: str
+    default_subject: str # This intends to have the MAIN BIOGRAPHEE name, for 'reflexive' relations
+    from_id: str
+    to_id: str
+    relation_type: str
+    clean_label: str
+    subject_entity: SpanAnnotation = None
+    object_entity: SpanAnnotation = None
 
 @dataclass
 class AnnotatedDocument():
@@ -59,6 +69,7 @@ class AnnotatedDocument():
     text: str
     tokens: List[str]
     annotated_spans: List[SpanAnnotation]
+    annotated_relations: List[Dict] = None
     tokens2spans: Dict[int, Tuple[int, int]] = None # Map TokenIndex -> (CharStart, CharEnd)
     annotator_id: str = None
     annotation_time: float = None
